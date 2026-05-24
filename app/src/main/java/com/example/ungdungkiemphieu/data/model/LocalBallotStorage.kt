@@ -12,7 +12,8 @@ data class PendingBallotInfo(
     val fileName: String,                  // tên file ảnh
     val detectedMarkers: List<String>,     // danh sách marker phát hiện
     val ballotId: Int? = null,             // ID của phiếu bầu (lấy từ QR code)
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val detectionMetadata: BallotDetectionMetadata? = null
 )
 
 data class UploadedBallotInfo(
@@ -37,7 +38,13 @@ class LocalBallotStorage(private val context: Context) {
     }
 
     /** Lưu ảnh tạm cho một pollId */
-    fun savePendingImage(pollId: Int, bitmap: Bitmap, detectedMarkers: List<String>, ballotId: Int? = null): String {
+    fun savePendingImage(
+        pollId: Int,
+        bitmap: Bitmap,
+        detectedMarkers: List<String>,
+        ballotId: Int? = null,
+        detectionMetadata: BallotDetectionMetadata? = null
+    ): String {
         // Tạo thư mục riêng cho poll
         val pollDir = File(ballotsDir, "poll_$pollId").apply { mkdirs() }
 
@@ -54,7 +61,7 @@ class LocalBallotStorage(private val context: Context) {
         val key = "$KEY_PENDING_LIST$pollId"
         val currentList = getPendingImages(pollId).toMutableList()
 
-        currentList.add(PendingBallotInfo(fileName, detectedMarkers, ballotId))
+        currentList.add(PendingBallotInfo(fileName, detectedMarkers, ballotId, detectionMetadata = detectionMetadata))
 
         prefs.edit()
             .putString(key, gson.toJson(currentList))
@@ -64,7 +71,13 @@ class LocalBallotStorage(private val context: Context) {
     }
 
     /** Lưu ảnh trực tiếp vào danh sách uploaded (dùng cho upload ngay) */
-    fun saveAsUploaded(pollId: Int, bitmap: Bitmap, detectedMarkers: List<String>, ballotId: Int? = null): String {
+    fun saveAsUploaded(
+        pollId: Int,
+        bitmap: Bitmap,
+        detectedMarkers: List<String>,
+        ballotId: Int? = null,
+        detectionMetadata: BallotDetectionMetadata? = null
+    ): String {
         // Tạo thư mục riêng cho poll
         val pollDir = File(ballotsDir, "poll_$pollId").apply { mkdirs() }
 

@@ -69,6 +69,7 @@ interface ApiService{
     suspend fun uploadBallot(
         @Path("poll_id") pollId: Int?,
         @Part("signatures") signatures: okhttp3.RequestBody,
+        @Part("detection_metadata") detectionMetadata: okhttp3.RequestBody? = null,
         @Part ballot_files: List<MultipartBody.Part>
     ): Response<UploadResponse>
 
@@ -77,6 +78,7 @@ interface ApiService{
     suspend fun uploadSingleBallot(
         @Path("poll_id") pollId: Int?,
         @Part ballot_file: MultipartBody.Part,
+        @Part("detection_metadata") detectionMetadata: okhttp3.RequestBody? = null,
         @Part ballot_id: MultipartBody.Part? = null
     ): Response<SingleUploadResponse>
 

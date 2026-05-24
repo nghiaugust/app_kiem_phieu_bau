@@ -1,16 +1,16 @@
 package com.example.ungdungkiemphieu.detector
 
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.util.Log
-import org.opencv.android.Utils
-import org.opencv.core.*
-import kotlin.math.max
-import kotlin.math.min
+import com.example.ungdungkiemphieu.data.model.BallotDetectionMetadata
+import com.example.ungdungkiemphieu.data.model.BallotMarkerMetadata
+import com.example.ungdungkiemphieu.data.model.BallotPoint
+import org.opencv.core.Point
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 class ArUcoDocumentCropper(
-    private val minMarkersRequired: Int = 4, // Cần QR + 3 ArUco = 4 markers
-    private val padding: Int = 30 // Tăng padding để đảm bảo markers nằm trong
+    private val minMarkersRequired: Int = 4
 ) {
 
     data class CropResult(
@@ -20,206 +20,239 @@ class ArUcoDocumentCropper(
         val corners: List<Point>? = null,
         val hasQR: Boolean = false,
         val qrData: String? = null,
-        val totalMarkersDetected: Int = 0
+        val totalMarkersDetected: Int = 0,
+        val detectionMetadata: BallotDetectionMetadata? = null
+    )
+
+    private data class MarkerCandidate(
+        val id: Int,
+        val corners: List<Point>,
+        val center: Point
+    )
+
+    private data class ClassifiedMarkers(
+        val topRight: MarkerCandidate,
+        val bottomRight: MarkerCandidate,
+        val bottomLeft: MarkerCandidate
     )
 
     private val qrAndArUcoDetector = QRAndArUcoDetector()
 
     suspend fun cropDocument(bitmap: Bitmap): CropResult {
-        // Phát hiện tất cả markers (QR + ArUco) trên ảnh gốc
         val detectResult = qrAndArUcoDetector.detectAllMarkers(bitmap)
 
         Log.d("CROP", "Total markers found: ${detectResult.totalMarkersFound}")
         Log.d("CROP", "QR: ${detectResult.qrData}, ArUco IDs: ${detectResult.arUcoIds.joinToString()}")
 
-        // Kiểm tra có đủ 4 markers không (1 QR + 3 ArUco)
-        if (detectResult.totalMarkersFound < minMarkersRequired) {
-            Log.w("CROP", "Not enough markers. Found: ${detectResult.totalMarkersFound}, Required: $minMarkersRequired")
+        val qrCorners = detectResult.qrCorners
+        val qrData = detectResult.qrData
+        if (qrCorners == null || qrCorners.size < 4 || qrData.isNullOrBlank()) {
             return CropResult(
-                null,
-                false,
-                detectResult.arUcoIds,
-                hasQR = detectResult.qrCorners != null,
-                qrData = detectResult.qrData,
+                croppedBitmap = null,
+                success = false,
+                usedMarkerIds = detectResult.arUcoIds,
+                hasQR = qrCorners != null,
+                qrData = qrData,
                 totalMarkersDetected = detectResult.totalMarkersFound
             )
         }
 
-        // Xác định và xoay ảnh để QR ở góc trên bên trái
-        val (orientedBitmap, rotationAngle) = orientImageWithQRTopLeft(bitmap, detectResult.qrCorners)
-        
-        // Phát hiện lại markers trên ảnh đã xoay (nếu có xoay)
-        val finalDetectResult = if (rotationAngle != 0) {
-            Log.d("CROP", "Re-detecting markers after rotation: $rotationAngle degrees")
-            qrAndArUcoDetector.detectAllMarkers(orientedBitmap)
-        } else {
-            detectResult
-        }
+        val markerCandidates = buildMarkerCandidates(detectResult)
+        val sharedMarkers = markerCandidates.filter { it.id == SHARED_ARUCO_ID }
+        val usableMarkers = if (sharedMarkers.size >= 3) sharedMarkers else markerCandidates
 
-        val srcMat = Mat()
-        Utils.bitmapToMat(orientedBitmap, srcMat)
-
-        // Thu thập tất cả các điểm từ QR và ArUco
-        val allPoints = mutableListOf<Point>()
-        val markerIdsUsed = mutableListOf<Int>()
-
-        // Thêm các góc của QR code
-        finalDetectResult.qrCorners?.let { qrCorners ->
-            allPoints.addAll(qrCorners)
-            Log.d("CROP", "Added QR corners: ${qrCorners.size} points")
-        }
-
-        // Thêm các góc của ArUco markers
-        for (i in finalDetectResult.arUcoIds.indices) {
-            val id = finalDetectResult.arUcoIds[i]
-            val cornerMat = finalDetectResult.arUcoCorners.getOrNull(i) ?: continue
-            val points = cornerMat.toArray()
-            if (points.isNotEmpty()) {
-                allPoints.addAll(points)
-                markerIdsUsed.add(id)
-                Log.d("CROP", "Added ArUco ID $id: ${points.size} points")
-            }
-        }
-
-        if (allPoints.isEmpty()) {
-            Log.w("CROP", "No corner points found")
-            srcMat.release()
-            if (orientedBitmap != bitmap) {
-                orientedBitmap.recycle()
-            }
+        if (usableMarkers.size < 3 || detectResult.totalMarkersFound < minMarkersRequired) {
+            Log.w("CROP", "Not enough reference markers. ArUco=${usableMarkers.size}, total=${detectResult.totalMarkersFound}")
             return CropResult(
-                null,
-                false,
-                finalDetectResult.arUcoIds,
-                hasQR = finalDetectResult.qrCorners != null,
-                qrData = finalDetectResult.qrData,
-                totalMarkersDetected = finalDetectResult.totalMarkersFound
+                croppedBitmap = null,
+                success = false,
+                usedMarkerIds = detectResult.arUcoIds,
+                hasQR = true,
+                qrData = qrData,
+                totalMarkersDetected = detectResult.totalMarkersFound
             )
         }
 
-        // Tìm bounding box chứa tất cả các markers
-        val xs = allPoints.map { it.x }
-        val ys = allPoints.map { it.y }
-
-        val left = max(0.0, xs.minOrNull()!! - padding)
-        val top = max(0.0, ys.minOrNull()!! - padding)
-        val right = min(srcMat.cols().toDouble() - 1, xs.maxOrNull()!! + padding)
-        val bottom = min(srcMat.rows().toDouble() - 1, ys.maxOrNull()!! + padding)
-
-        val width = (right - left).toInt()
-        val height = (bottom - top).toInt()
-
-        Log.d("CROP", "Crop region: left=$left, top=$top, width=$width, height=$height")
-
-        // Crop vùng chứa tất cả markers
-        val croppedMat = Mat(srcMat, Rect(left.toInt(), top.toInt(), width, height))
-
-        // Chuyển sang Bitmap
-        val croppedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(croppedMat, croppedBitmap)
-
-        // Cleanup
-        srcMat.release()
-        croppedMat.release()
-        if (orientedBitmap != bitmap) {
-            orientedBitmap.recycle()
+        val qrCenter = averagePoint(qrCorners)
+        val selectedMarkers = chooseBestThreeMarkers(usableMarkers, qrCenter)
+        val classified = classifyMarkers(selectedMarkers, qrCenter)
+        if (classified == null) {
+            Log.w("CROP", "Cannot classify ArUco markers into TR/BR/BL")
+            return CropResult(
+                croppedBitmap = null,
+                success = false,
+                usedMarkerIds = detectResult.arUcoIds,
+                hasQR = true,
+                qrData = qrData,
+                totalMarkersDetected = detectResult.totalMarkersFound
+            )
         }
 
+        val documentCenter = averagePoint(
+            listOf(
+                qrCenter,
+                classified.topRight.center,
+                classified.bottomRight.center,
+                classified.bottomLeft.center
+            )
+        )
+
+        val qrInner = closestPoint(qrCorners, documentCenter)
+        val topRightInner = closestPoint(classified.topRight.corners, documentCenter)
+        val bottomRightInner = closestPoint(classified.bottomRight.corners, documentCenter)
+        val bottomLeftInner = closestPoint(classified.bottomLeft.corners, documentCenter)
+
+        val srcPoints = listOf(qrInner, topRightInner, bottomRightInner, bottomLeftInner)
+        if (abs(polygonArea(srcPoints)) < 100.0) {
+            Log.w("CROP", "Reference polygon is too small or degenerate")
+            return CropResult(
+                croppedBitmap = null,
+                success = false,
+                usedMarkerIds = selectedMarkers.map { it.id },
+                hasQR = true,
+                qrData = qrData,
+                totalMarkersDetected = detectResult.totalMarkersFound
+            )
+        }
+
+        val metadata = BallotDetectionMetadata(
+            qr_raw = qrData,
+            ballot_id = parseBallotId(qrData),
+            image_width = bitmap.width,
+            image_height = bitmap.height,
+            src_points = srcPoints.map { it.toBallotPoint() },
+            qr_corners = qrCorners.map { it.toBallotPoint() },
+            markers = listOf(
+                classified.topRight.toMetadata("top_right", topRightInner),
+                classified.bottomRight.toMetadata("bottom_right", bottomRightInner),
+                classified.bottomLeft.toMetadata("bottom_left", bottomLeftInner)
+            ),
+            shared_aruco_id = SHARED_ARUCO_ID
+        )
+
+        Log.d("CROP", "Client detection metadata ready: src_points=${metadata.src_points}")
+
+        // Keep the original bitmap for upload. The server will use src_points to warp it.
         return CropResult(
-            croppedBitmap = croppedBitmap,
+            croppedBitmap = bitmap,
             success = true,
-            usedMarkerIds = markerIdsUsed,
-            corners = allPoints,
-            hasQR = finalDetectResult.qrCorners != null,
-            qrData = finalDetectResult.qrData,
-            totalMarkersDetected = finalDetectResult.totalMarkersFound
+            usedMarkerIds = selectedMarkers.map { it.id },
+            corners = srcPoints,
+            hasQR = true,
+            qrData = qrData,
+            totalMarkersDetected = detectResult.totalMarkersFound,
+            detectionMetadata = metadata
         )
     }
 
-    /**
-     * Xác định vị trí QR code và xoay ảnh để QR ở góc trên bên trái
-     * @return Pair<Bitmap đã xoay, góc xoay (0, 90, 180, 270)>
-     */
-    private fun orientImageWithQRTopLeft(bitmap: Bitmap, qrCorners: List<Point>?): Pair<Bitmap, Int> {
-        if (qrCorners == null || qrCorners.size < 4) {
-            Log.d("CROP", "No QR corners, keeping original orientation")
-            return Pair(bitmap, 0)
+    private fun buildMarkerCandidates(result: QRAndArUcoDetector.DetectionResult): List<MarkerCandidate> {
+        val markers = mutableListOf<MarkerCandidate>()
+        for (index in result.arUcoIds.indices) {
+            val corners = result.arUcoCorners.getOrNull(index)?.toArray()?.toList().orEmpty()
+            if (corners.size < 4) continue
+            markers.add(
+                MarkerCandidate(
+                    id = result.arUcoIds[index],
+                    corners = corners,
+                    center = averagePoint(corners)
+                )
+            )
         }
+        return markers
+    }
 
-        val width = bitmap.width.toDouble()
-        val height = bitmap.height.toDouble()
-        val threshold = min(width, height) * 0.3 // 30% của cạnh ngắn hơn
+    private fun chooseBestThreeMarkers(markers: List<MarkerCandidate>, qrCenter: Point): List<MarkerCandidate> {
+        if (markers.size <= 3) return markers
 
-        // Tìm điểm góc trên bên trái của QR (điểm có x + y nhỏ nhất)
-        val topLeftQR = qrCorners.minByOrNull { it.x + it.y } ?: return Pair(bitmap, 0)
-        
-        val qrX = topLeftQR.x
-        val qrY = topLeftQR.y
-        
-        // Xác định góc của ảnh mà QR đang nằm
-        val isNearTop = qrY < threshold
-        val isNearLeft = qrX < threshold
-        val isNearBottom = qrY > (height - threshold)
-        val isNearRight = qrX > (width - threshold)
-        
-        val rotationAngle = when {
-            isNearTop && isNearLeft -> {
-                Log.d("CROP", "QR already at top-left, no rotation needed")
-                0
-            }
-            isNearTop && isNearRight -> {
-                Log.d("CROP", "QR at top-right, rotating 90 degrees clockwise")
-                90
-            }
-            isNearBottom && isNearRight -> {
-                Log.d("CROP", "QR at bottom-right, rotating 180 degrees")
-                180
-            }
-            isNearBottom && isNearLeft -> {
-                Log.d("CROP", "QR at bottom-left, rotating 270 degrees (or -90)")
-                270
-            }
-            // Nếu không rõ ràng, dùng khoảng cách đến các góc
-            else -> {
-                val distToTopLeft = kotlin.math.sqrt(qrX * qrX + qrY * qrY)
-                val distToTopRight = kotlin.math.sqrt((width - qrX) * (width - qrX) + qrY * qrY)
-                val distToBottomLeft = kotlin.math.sqrt(qrX * qrX + (height - qrY) * (height - qrY))
-                val distToBottomRight = kotlin.math.sqrt((width - qrX) * (width - qrX) + (height - qrY) * (height - qrY))
-                
-                when (minOf(distToTopLeft, distToTopRight, distToBottomLeft, distToBottomRight)) {
-                    distToTopLeft -> {
-                        Log.d("CROP", "QR closest to top-left, no rotation")
-                        0
+        var best = markers.take(3)
+        var bestScore = Double.NEGATIVE_INFINITY
+
+        for (i in 0 until markers.size - 2) {
+            for (j in i + 1 until markers.size - 1) {
+                for (k in j + 1 until markers.size) {
+                    val combo = listOf(markers[i], markers[j], markers[k])
+                    val score = combo.sumOf { distance(it.center, qrCenter) } +
+                        distance(combo[0].center, combo[1].center) +
+                        distance(combo[1].center, combo[2].center) +
+                        distance(combo[2].center, combo[0].center)
+                    if (score > bestScore) {
+                        bestScore = score
+                        best = combo
                     }
-                    distToTopRight -> {
-                        Log.d("CROP", "QR closest to top-right, rotating 90 degrees")
-                        90
-                    }
-                    distToBottomRight -> {
-                        Log.d("CROP", "QR closest to bottom-right, rotating 180 degrees")
-                        180
-                    }
-                    distToBottomLeft -> {
-                        Log.d("CROP", "QR closest to bottom-left, rotating 270 degrees")
-                        270
-                    }
-                    else -> 0
                 }
             }
         }
 
-        if (rotationAngle == 0) {
-            return Pair(bitmap, 0)
+        return best
+    }
+
+    private fun classifyMarkers(markers: List<MarkerCandidate>, qrCenter: Point): ClassifiedMarkers? {
+        if (markers.size < 3) return null
+
+        val sortedByDistance = markers.sortedBy { distance(it.center, qrCenter) }
+        val bottomRight = sortedByDistance.last()
+        val adjacent = sortedByDistance.take(2)
+
+        val firstDistance = distance(adjacent[0].center, qrCenter)
+        val secondDistance = distance(adjacent[1].center, qrCenter)
+
+        val topRight: MarkerCandidate
+        val bottomLeft: MarkerCandidate
+        if (firstDistance <= secondDistance) {
+            topRight = adjacent[0]
+            bottomLeft = adjacent[1]
+        } else {
+            topRight = adjacent[1]
+            bottomLeft = adjacent[0]
         }
 
-        // Xoay ảnh
-        val matrix = Matrix()
-        matrix.postRotate(rotationAngle.toFloat())
-        val rotatedBitmap = Bitmap.createBitmap(
-            bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-        )
+        return ClassifiedMarkers(topRight, bottomRight, bottomLeft)
+    }
 
-        Log.d("CROP", "Image rotated: $rotationAngle degrees")
-        return Pair(rotatedBitmap, rotationAngle)
+    private fun averagePoint(points: List<Point>): Point {
+        val x = points.sumOf { it.x } / points.size
+        val y = points.sumOf { it.y } / points.size
+        return Point(x, y)
+    }
+
+    private fun closestPoint(points: List<Point>, target: Point): Point {
+        return points.minByOrNull { distance(it, target) } ?: points.first()
+    }
+
+    private fun distance(a: Point, b: Point): Double {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private fun polygonArea(points: List<Point>): Double {
+        var area = 0.0
+        for (i in points.indices) {
+            val current = points[i]
+            val next = points[(i + 1) % points.size]
+            area += current.x * next.y - next.x * current.y
+        }
+        return area / 2.0
+    }
+
+    private fun parseBallotId(qrData: String): Int? {
+        return qrData.split(":").getOrNull(1)?.toIntOrNull()
+    }
+
+    private fun Point.toBallotPoint(): BallotPoint {
+        return BallotPoint(x = x, y = y)
+    }
+
+    private fun MarkerCandidate.toMetadata(role: String, innerPoint: Point): BallotMarkerMetadata {
+        return BallotMarkerMetadata(
+            role = role,
+            id = id,
+            corners = corners.map { it.toBallotPoint() },
+            inner_point = innerPoint.toBallotPoint()
+        )
+    }
+
+    companion object {
+        private const val SHARED_ARUCO_ID = 17
     }
 }

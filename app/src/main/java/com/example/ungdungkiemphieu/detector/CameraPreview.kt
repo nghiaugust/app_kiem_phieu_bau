@@ -157,6 +157,7 @@ fun CameraScreen(
     var processingBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var verifyResult by remember { mutableStateOf<VerifyHmacResponse?>(null) }
+    var detectionMetadata by remember { mutableStateOf<BallotDetectionMetadata?>(null) }
 
     DisposableEffect(lifecycleOwner) {
         cameraController.bindToLifecycle(lifecycleOwner)
@@ -185,6 +186,7 @@ fun CameraScreen(
                 hasValidMarkers = hasValidMarkers,
                 totalMarkersFound = totalMarkersFound,
                 verifyResult = verifyResult,
+                detectionMetadata = detectionMetadata,
                 snackbarHostState = snackbarHostState,
                 snackbarScope = snackbarScope,
                 onRetake = {
@@ -195,6 +197,7 @@ fun CameraScreen(
                     processingBitmap = null
                     isProcessing = false
                     verifyResult = null
+                    detectionMetadata = null
                 },
                 onConfirm = {
                     // Chỉ cho phép lưu nếu có đủ markers
@@ -230,7 +233,13 @@ fun CameraScreen(
                     }
 
                     // Lưu ảnh vào file + thêm vào danh sách pending
-                    localStorage.savePendingImage(pollId, capturedBitmap!!, detectedMarkers, ballotId)
+                    localStorage.savePendingImage(
+                        pollId,
+                        capturedBitmap!!,
+                        detectedMarkers,
+                        ballotId,
+                        detectionMetadata
+                    )
 
                     snackbarScope.launch {
                         snackbarHostState.showSnackbar(
@@ -247,6 +256,7 @@ fun CameraScreen(
                     totalMarkersFound = 0
                     processingBitmap = null
                     isProcessing = false
+                    detectionMetadata = null
                 }
             )
         }
@@ -292,7 +302,7 @@ fun CameraScreen(
                         takePhoto(
                             controller = cameraController,
                             cropper = cropper,
-                            onPhotoTaken = { bitmap, markers, isValid, totalFound, verify ->
+                            onPhotoTaken = { bitmap, markers, isValid, totalFound, verify, metadata ->
                                 // Chỉ set capturedBitmap, để when condition tự chuyển
                                 // Không reset processingBitmap và isProcessing ở đây
                                 capturedBitmap = bitmap
@@ -300,6 +310,7 @@ fun CameraScreen(
                                 hasValidMarkers = isValid
                                 totalMarkersFound = totalFound
                                 verifyResult = verify
+                                detectionMetadata = metadata
                                 isCapturing = false
                                 // Sẽ reset khi user retake hoặc confirm
                             },
@@ -888,7 +899,7 @@ fun CameraCaptureButton(
 private fun takePhoto(
     controller: LifecycleCameraController,
     cropper: ArUcoDocumentCropper,
-    onPhotoTaken: (Bitmap, List<String>, Boolean, Int, VerifyHmacResponse?) -> Unit,
+    onPhotoTaken: (Bitmap, List<String>, Boolean, Int, VerifyHmacResponse?, BallotDetectionMetadata?) -> Unit,
     onProcessing: (Bitmap) -> Unit,
     context: Context,
     scope: CoroutineScope,
@@ -912,7 +923,7 @@ private fun takePhoto(
 private fun takePhotoOptimized(
     controller: LifecycleCameraController,
     cropper: ArUcoDocumentCropper,
-    onPhotoTaken: (Bitmap, List<String>, Boolean, Int, VerifyHmacResponse?) -> Unit,
+    onPhotoTaken: (Bitmap, List<String>, Boolean, Int, VerifyHmacResponse?, BallotDetectionMetadata?) -> Unit,
     onProcessing: (Bitmap) -> Unit,
     context: Context,
     scope: CoroutineScope,
@@ -945,7 +956,6 @@ private fun takePhotoOptimized(
                         val processingTime = System.currentTimeMillis() - processingStartTime
                         Log.d("PERF", "✅ OPTIMIZED: Xử lý markers: ${processingTime}ms")
 
-                        val outputBitmap = cropResult.croppedBitmap
 
                         // Tạo danh sách thông tin markers
                         val markerInfo = mutableListOf<String>()
@@ -1017,14 +1027,21 @@ private fun takePhotoOptimized(
                         }
 
                         // Dùng ảnh crop được nếu có, ngược lại trả về ảnh gốc
-                        val finalBitmap = outputBitmap ?: original
+                        val finalBitmap = original
 
                         val totalTime = System.currentTimeMillis() - totalStartTime
                         Log.d("PERF", "✅ OPTIMIZED: Tổng thời gian: ${totalTime}ms (Markers: ${processingTime}ms)")
                         Log.d("PERF", "✅ OPTIMIZED: Main Thread RẢNH RỖI - KẾT THÚC (Giao diện mượt mà!)")
 
                         withContext(Dispatchers.Main) {
-                            onPhotoTaken(finalBitmap, markerInfo, isValid, totalFound, verifyResponse)
+                            onPhotoTaken(
+                                finalBitmap,
+                                markerInfo,
+                                isValid,
+                                totalFound,
+                                verifyResponse,
+                                cropResult.detectionMetadata
+                            )
                         }
                     } catch (e: Exception) {
                         Log.e("Camera", "Photo processing failed: ${e.message}", e)
@@ -1034,6 +1051,7 @@ private fun takePhotoOptimized(
                                 listOf("⚠️ Lỗi xử lý ảnh: ${e.message ?: "không rõ"}"),
                                 false,
                                 0,
+                                null,
                                 null
                             )
                         }
@@ -1155,6 +1173,7 @@ fun ImagePreviewScreen(
     hasValidMarkers: Boolean = false,
     totalMarkersFound: Int = 0,
     verifyResult: VerifyHmacResponse? = null,
+    detectionMetadata: BallotDetectionMetadata? = null,
     snackbarHostState: SnackbarHostState,
     snackbarScope: CoroutineScope,
     onRetake: () -> Unit,
@@ -1334,7 +1353,8 @@ fun ImagePreviewScreen(
                             pollId = pollId,
                             bitmap = bitmap,
                             detectedMarkers = detectedMarkers,
-                            ballotId = ballotId
+                            ballotId = ballotId,
+                            detectionMetadata = detectionMetadata
                         )
 
                         // Lên lịch upload nền bằng WorkManager
@@ -1352,13 +1372,20 @@ fun ImagePreviewScreen(
                             uploadViewModel.uploadSingleImage(
                                 bitmap = bitmap,
                                 pollId = pollId,
-                                context = context
+                                context = context,
+                                detectionMetadata = detectionMetadata
                             ) { success, message ->
                                 snackbarScope.launch {
                                     snackbarHostState.showSnackbar(message)
                                 }
                                 if (success) {
-                                    localStorage.saveAsUploaded(pollId, bitmap, detectedMarkers, ballotId)
+                                    localStorage.saveAsUploaded(
+                                        pollId,
+                                        bitmap,
+                                        detectedMarkers,
+                                        ballotId,
+                                        detectionMetadata
+                                    )
                                 }
                             }
                         }

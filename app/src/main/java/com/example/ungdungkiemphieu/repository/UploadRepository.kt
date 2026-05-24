@@ -24,7 +24,8 @@ class UploadRepository(
     suspend fun uploadBallots(
         bitmaps: List<Bitmap>,
         pollId: Int?,
-        context: Context
+        context: Context,
+        detectionMetadataList: List<BallotDetectionMetadata?> = emptyList()
     ): UploadResponse {
         if (bitmaps.isEmpty()) throw IllegalArgumentException("No images to upload")
 
@@ -43,6 +44,7 @@ class UploadRepository(
 
             // Bước 2: Tạo signatures cho từng file
             val signatures = mutableMapOf<String, String>()
+            val detectionMetadataByFile = mutableMapOf<String, BallotDetectionMetadata>()
             val parts = mutableListOf<MultipartBody.Part>()
             
             for ((index, bitmap) in bitmaps.withIndex()) {
@@ -62,6 +64,9 @@ class UploadRepository(
                 try {
                     val signature = FileHashSigner.signBitmap(bitmap, fileName, privateKey)
                     signatures[fileName] = signature
+                    detectionMetadataList.getOrNull(index)?.let { metadata ->
+                        detectionMetadataByFile[fileName] = metadata
+                    }
                     Log.d("UploadRepository", "✓ Signed $fileName")
                     Log.d("UploadRepository", "  Signature (full): $signature")
                     Log.d("UploadRepository", "  File size: ${file.length()} bytes")
@@ -83,6 +88,7 @@ class UploadRepository(
 
             // Bước 3: Tạo signatures JSON part
             val signaturesJson = Gson().toJson(signatures)
+            val detectionMetadataJson = Gson().toJson(detectionMetadataByFile)
             Log.d("UploadRepository", "===========================================")
             Log.d("UploadRepository", "SENDING TO SERVER:")
             Log.d("UploadRepository", "Total files: ${parts.size}")
@@ -92,11 +98,14 @@ class UploadRepository(
             }
             Log.d("UploadRepository", "===========================================")
             val signaturesRequestBody = signaturesJson.toRequestBody("application/json".toMediaTypeOrNull())
+            val detectionMetadataRequestBody =
+                detectionMetadataJson.toRequestBody("application/json".toMediaTypeOrNull())
 
             // Bước 4: Gửi request với signatures + files
             val response = api.uploadBallot(
                 pollId = pollId,
                 signatures = signaturesRequestBody,
+                detectionMetadata = detectionMetadataRequestBody,
                 ballot_files = parts
             )
 
@@ -166,7 +175,8 @@ class UploadRepository(
         bitmap: Bitmap,
         pollId: Int?,
         ballotId: Int? = null,
-        context: Context
+        context: Context,
+        detectionMetadata: BallotDetectionMetadata? = null
     ): SingleUploadResponse {
         val tempFile = bitmapToFile(bitmap, context)
 
@@ -187,6 +197,9 @@ class UploadRepository(
             val response = api.uploadSingleBallot(
                 pollId = pollId,
                 ballot_file = ballotFilePart,
+                detectionMetadata = detectionMetadata?.let {
+                    Gson().toJson(it).toRequestBody("application/json".toMediaTypeOrNull())
+                },
                 ballot_id = ballotIdPart
             )
             if (response.isSuccessful && response.body() != null) {

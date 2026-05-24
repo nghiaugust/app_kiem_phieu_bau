@@ -43,6 +43,7 @@ class UploadViewModel(
         bitmap: Bitmap,
         pollId: Int?,
         context: Context,
+        detectionMetadata: com.example.ungdungkiemphieu.data.model.BallotDetectionMetadata? = null,
         onComplete: (success: Boolean, message: String) -> Unit
     ) {
         viewModelScope.launch {
@@ -61,7 +62,8 @@ class UploadViewModel(
                     bitmap = bitmap,
                     pollId = pollId,
                     ballotId = null, // Tạo mới, không update
-                    context = context
+                    context = context,
+                    detectionMetadata = detectionMetadata
                 )
 
                 Log.d("UploadVM", "Single upload successful: ballot_id=${response.ballot_id}, is_update=${response.is_update}")
@@ -105,12 +107,14 @@ class UploadViewModel(
 
                 // 2. Đọc file → Bitmap
                 val bitmaps = mutableListOf<Bitmap>()
+                val detectionMetadataList = mutableListOf<com.example.ungdungkiemphieu.data.model.BallotDetectionMetadata?>()
                 for (info in pendingInfos) {
                     val file = localStorage.getImageFile(pollId, info)
                     if (file.exists()) {
                         val bitmap = BitmapFactory.decodeFile(file.absolutePath)
                         if (bitmap != null) {
                             bitmaps.add(bitmap)
+                            detectionMetadataList.add(info.detectionMetadata)
                         } else {
                             Log.e("UploadVM", "Không đọc được bitmap từ file: ${file.absolutePath}")
                         }
@@ -125,7 +129,12 @@ class UploadViewModel(
                 }
 
                 // 3. Gọi repository upload nhiều ảnh
-                val response = uploadRepository.uploadBallots(bitmaps, pollId, context)
+                val response = uploadRepository.uploadBallots(
+                    bitmaps,
+                    pollId,
+                    context,
+                    detectionMetadataList
+                )
 
                 // 4. Thành công → xóa pending + tăng uploaded count
                 uploadResult = response

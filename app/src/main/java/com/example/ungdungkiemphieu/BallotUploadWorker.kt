@@ -77,13 +77,27 @@ class BallotUploadWorker(
                 }
                 
                 try {
+                    val metadataList = mutableListOf<com.example.ungdungkiemphieu.data.model.BallotDetectionMetadata?>()
                     val bitmaps = chunk.mapNotNull { info ->
                         val file = localStorage.getImageFile(pollId, info)
-                        if (file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
+                        if (file.exists()) {
+                            val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                            if (bitmap != null) {
+                                metadataList.add(info.detectionMetadata)
+                            }
+                            bitmap
+                        } else {
+                            null
+                        }
                     }
                     if (bitmaps.isEmpty()) continue
                     val response =
-                        uploadRepository.uploadBallots(bitmaps, pollId, applicationContext)
+                        uploadRepository.uploadBallots(
+                            bitmaps,
+                            pollId,
+                            applicationContext,
+                            metadataList
+                        )
                     // Chỉ chuyển sang uploaded khi upload thành công
                     chunk.forEach { info ->
                         runCatching { localStorage.incrementUploadedCount(pollId, info.fileName) }

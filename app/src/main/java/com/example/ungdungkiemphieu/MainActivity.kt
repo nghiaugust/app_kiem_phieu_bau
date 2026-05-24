@@ -43,7 +43,7 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        if (!OpenCVLoader.initDebug()) {
+        if (!OpenCVLoader.initLocal()) {
             Log.e("OpenCV", "Unable to load OpenCV!")
         } else {
             Log.d("OpenCV", "OpenCV loaded successfully")
