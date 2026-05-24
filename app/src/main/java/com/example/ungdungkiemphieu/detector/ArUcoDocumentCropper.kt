@@ -102,7 +102,21 @@ class ArUcoDocumentCropper(
         val bottomRightInner = closestPoint(classified.bottomRight.corners, documentCenter)
         val bottomLeftInner = closestPoint(classified.bottomLeft.corners, documentCenter)
 
-        val srcPoints = listOf(qrInner, topRightInner, bottomRightInner, bottomLeftInner)
+        var normalizedTopRight = classified.topRight
+        var normalizedTopRightInner = topRightInner
+        var normalizedBottomLeft = classified.bottomLeft
+        var normalizedBottomLeftInner = bottomLeftInner
+
+        var srcPoints = listOf(qrInner, normalizedTopRightInner, bottomRightInner, normalizedBottomLeftInner)
+        if (polygonArea(srcPoints) < 0.0) {
+            Log.d("CROP", "Reference polygon winding is reversed, swapping top-right and bottom-left")
+            normalizedTopRight = classified.bottomLeft
+            normalizedTopRightInner = bottomLeftInner
+            normalizedBottomLeft = classified.topRight
+            normalizedBottomLeftInner = topRightInner
+            srcPoints = listOf(qrInner, normalizedTopRightInner, bottomRightInner, normalizedBottomLeftInner)
+        }
+
         if (abs(polygonArea(srcPoints)) < 100.0) {
             Log.w("CROP", "Reference polygon is too small or degenerate")
             return CropResult(
@@ -123,9 +137,9 @@ class ArUcoDocumentCropper(
             src_points = srcPoints.map { it.toBallotPoint() },
             qr_corners = qrCorners.map { it.toBallotPoint() },
             markers = listOf(
-                classified.topRight.toMetadata("top_right", topRightInner),
+                normalizedTopRight.toMetadata("top_right", normalizedTopRightInner),
                 classified.bottomRight.toMetadata("bottom_right", bottomRightInner),
-                classified.bottomLeft.toMetadata("bottom_left", bottomLeftInner)
+                normalizedBottomLeft.toMetadata("bottom_left", normalizedBottomLeftInner)
             ),
             shared_aruco_id = SHARED_ARUCO_ID
         )
